@@ -145,8 +145,9 @@ object ProtoToRowGenerator {
     // We avoid importing BufferHolder because it is package‑private and cannot be referenced
     // directly from outside its package.  UnsafeRowWriter handles BufferHolder internally.
     code ++= "import org.apache.spark.sql.catalyst.expressions.codegen.UnsafeRowWriter;\n"
-    code ++= "import org.apache.spark.sql.catalyst.util.GenericArrayData;\n"
-    code ++= "import org.apache.spark.sql.catalyst.util.ArrayData;\n"
+    // Import UnsafeArrayWriter for writing repeated fields directly into the row buffer
+    code ++= "import org.apache.spark.sql.catalyst.expressions.codegen.UnsafeArrayWriter;\n"
+    // Note: ArrayData and GenericArrayData are no longer imported because arrays are written using UnsafeArrayWriter
     code ++= "import org.apache.spark.sql.types.StructType;\n"
     code ++= "import org.apache.spark.sql.types.ArrayType;\n"
     code ++= "import org.apache.spark.sql.types.StructField;\n"
@@ -219,62 +220,76 @@ object ProtoToRowGenerator {
       fd.getJavaType match {
         case FieldDescriptor.JavaType.INT =>
           if (fd.isRepeated) {
-            // Repeated int32: build primitive array and write as UnsafeArrayData using getCount() and get(i)
+            // Repeated int32: write using UnsafeArrayWriter (element size = 4 bytes)
             code ++= s"    int size${idx} = msg.${countMethodName}();\n"
-            code ++= s"    int[] arr${idx} = new int[size${idx}];\n"
-            code ++= s"    for (int i = 0; i < size${idx}; i++) { arr${idx}[i] = msg.${indexGetterName}(i); }\n"
-            code ++= s"    ArrayData data${idx} = org.apache.spark.sql.catalyst.util.UnsafeArrayData.fromPrimitiveArray(arr${idx});\n"
-            code ++= s"    writer.write($idx, data${idx}, ((ArrayType) schema.apply($idx).dataType()).elementType());\n"
+            code ++= s"    int offset${idx} = writer.cursor();\n"
+            code ++= s"    org.apache.spark.sql.catalyst.expressions.codegen.UnsafeArrayWriter arrayWriter${idx} = new org.apache.spark.sql.catalyst.expressions.codegen.UnsafeArrayWriter(writer, 4);\n"
+            code ++= s"    arrayWriter${idx}.initialize(size${idx});\n"
+            code ++= s"    for (int i = 0; i < size${idx}; i++) { arrayWriter${idx}.write(i, msg.${indexGetterName}(i)); }\n"
+            code ++= s"    writer.setOffsetAndSizeFromPreviousCursor($idx, offset${idx});\n"
           } else {
             code ++= s"    writer.write($idx, msg.${getterName}());\n"
           }
         case FieldDescriptor.JavaType.LONG =>
           if (fd.isRepeated) {
+            // Repeated int64: element size = 8 bytes
             code ++= s"    int size${idx} = msg.${countMethodName}();\n"
-            code ++= s"    long[] arr${idx} = new long[size${idx}];\n"
-            code ++= s"    for (int i = 0; i < size${idx}; i++) { arr${idx}[i] = msg.${indexGetterName}(i); }\n"
-            code ++= s"    ArrayData data${idx} = org.apache.spark.sql.catalyst.util.UnsafeArrayData.fromPrimitiveArray(arr${idx});\n"
-            code ++= s"    writer.write($idx, data${idx}, ((ArrayType) schema.apply($idx).dataType()).elementType());\n"
+            code ++= s"    int offset${idx} = writer.cursor();\n"
+            code ++= s"    org.apache.spark.sql.catalyst.expressions.codegen.UnsafeArrayWriter arrayWriter${idx} = new org.apache.spark.sql.catalyst.expressions.codegen.UnsafeArrayWriter(writer, 8);\n"
+            code ++= s"    arrayWriter${idx}.initialize(size${idx});\n"
+            code ++= s"    for (int i = 0; i < size${idx}; i++) { arrayWriter${idx}.write(i, msg.${indexGetterName}(i)); }\n"
+            code ++= s"    writer.setOffsetAndSizeFromPreviousCursor($idx, offset${idx});\n"
           } else {
             code ++= s"    writer.write($idx, msg.${getterName}());\n"
           }
         case FieldDescriptor.JavaType.FLOAT =>
           if (fd.isRepeated) {
+            // Repeated float: element size = 4 bytes
             code ++= s"    int size${idx} = msg.${countMethodName}();\n"
-            code ++= s"    float[] arr${idx} = new float[size${idx}];\n"
-            code ++= s"    for (int i = 0; i < size${idx}; i++) { arr${idx}[i] = msg.${indexGetterName}(i); }\n"
-            code ++= s"    ArrayData data${idx} = org.apache.spark.sql.catalyst.util.UnsafeArrayData.fromPrimitiveArray(arr${idx});\n"
-            code ++= s"    writer.write($idx, data${idx}, ((ArrayType) schema.apply($idx).dataType()).elementType());\n"
+            code ++= s"    int offset${idx} = writer.cursor();\n"
+            code ++= s"    org.apache.spark.sql.catalyst.expressions.codegen.UnsafeArrayWriter arrayWriter${idx} = new org.apache.spark.sql.catalyst.expressions.codegen.UnsafeArrayWriter(writer, 4);\n"
+            code ++= s"    arrayWriter${idx}.initialize(size${idx});\n"
+            code ++= s"    for (int i = 0; i < size${idx}; i++) { arrayWriter${idx}.write(i, msg.${indexGetterName}(i)); }\n"
+            code ++= s"    writer.setOffsetAndSizeFromPreviousCursor($idx, offset${idx});\n"
           } else {
             code ++= s"    writer.write($idx, msg.${getterName}());\n"
           }
         case FieldDescriptor.JavaType.DOUBLE =>
           if (fd.isRepeated) {
+            // Repeated double: element size = 8 bytes
             code ++= s"    int size${idx} = msg.${countMethodName}();\n"
-            code ++= s"    double[] arr${idx} = new double[size${idx}];\n"
-            code ++= s"    for (int i = 0; i < size${idx}; i++) { arr${idx}[i] = msg.${indexGetterName}(i); }\n"
-            code ++= s"    ArrayData data${idx} = org.apache.spark.sql.catalyst.util.UnsafeArrayData.fromPrimitiveArray(arr${idx});\n"
-            code ++= s"    writer.write($idx, data${idx}, ((ArrayType) schema.apply($idx).dataType()).elementType());\n"
+            code ++= s"    int offset${idx} = writer.cursor();\n"
+            code ++= s"    org.apache.spark.sql.catalyst.expressions.codegen.UnsafeArrayWriter arrayWriter${idx} = new org.apache.spark.sql.catalyst.expressions.codegen.UnsafeArrayWriter(writer, 8);\n"
+            code ++= s"    arrayWriter${idx}.initialize(size${idx});\n"
+            code ++= s"    for (int i = 0; i < size${idx}; i++) { arrayWriter${idx}.write(i, msg.${indexGetterName}(i)); }\n"
+            code ++= s"    writer.setOffsetAndSizeFromPreviousCursor($idx, offset${idx});\n"
           } else {
             code ++= s"    writer.write($idx, msg.${getterName}());\n"
           }
         case FieldDescriptor.JavaType.BOOLEAN =>
           if (fd.isRepeated) {
+            // Repeated boolean: element size = 1 byte
             code ++= s"    int size${idx} = msg.${countMethodName}();\n"
-            code ++= s"    Object[] arr${idx} = new Object[size${idx}];\n"
-            code ++= s"    for (int i = 0; i < size${idx}; i++) { arr${idx}[i] = msg.${indexGetterName}(i); }\n"
-            code ++= s"    ArrayData data${idx} = new GenericArrayData(arr${idx});\n"
-            code ++= s"    writer.write($idx, data${idx}, ((ArrayType) schema.apply($idx).dataType()).elementType());\n"
+            code ++= s"    int offset${idx} = writer.cursor();\n"
+            code ++= s"    org.apache.spark.sql.catalyst.expressions.codegen.UnsafeArrayWriter arrayWriter${idx} = new org.apache.spark.sql.catalyst.expressions.codegen.UnsafeArrayWriter(writer, 1);\n"
+            code ++= s"    arrayWriter${idx}.initialize(size${idx});\n"
+            code ++= s"    for (int i = 0; i < size${idx}; i++) { arrayWriter${idx}.write(i, msg.${indexGetterName}(i)); }\n"
+            code ++= s"    writer.setOffsetAndSizeFromPreviousCursor($idx, offset${idx});\n"
           } else {
             code ++= s"    writer.write($idx, msg.${getterName}());\n"
           }
         case FieldDescriptor.JavaType.STRING =>
           if (fd.isRepeated) {
+            // Repeated strings: element size = 8 bytes (offset & length)
             code ++= s"    int size${idx} = msg.${countMethodName}();\n"
-            code ++= s"    Object[] arr${idx} = new Object[size${idx}];\n"
-            code ++= s"    for (int i = 0; i < size${idx}; i++) { String s = msg.${indexGetterName}(i); arr${idx}[i] = (s == null ? null : UTF8String.fromString(s)); }\n"
-            code ++= s"    ArrayData data${idx} = new GenericArrayData(arr${idx});\n"
-            code ++= s"    writer.write($idx, data${idx}, ((ArrayType) schema.apply($idx).dataType()).elementType());\n"
+            code ++= s"    int offset${idx} = writer.cursor();\n"
+            code ++= s"    org.apache.spark.sql.catalyst.expressions.codegen.UnsafeArrayWriter arrayWriter${idx} = new org.apache.spark.sql.catalyst.expressions.codegen.UnsafeArrayWriter(writer, 8);\n"
+            code ++= s"    arrayWriter${idx}.initialize(size${idx});\n"
+            code ++= s"    for (int i = 0; i < size${idx}; i++) {\n"
+            code ++= s"      String s = msg.${indexGetterName}(i);\n"
+            code ++= s"      if (s == null) { arrayWriter${idx}.setNull(i); } else { arrayWriter${idx}.write(i, UTF8String.fromString(s)); }\n"
+            code ++= s"    }\n"
+            code ++= s"    writer.setOffsetAndSizeFromPreviousCursor($idx, offset${idx});\n"
           } else {
             code ++= s"    String v${idx} = msg.${getterName}();\n"
             code ++= s"    if (v${idx} == null) {\n"
@@ -285,11 +300,16 @@ object ProtoToRowGenerator {
           }
         case FieldDescriptor.JavaType.BYTE_STRING =>
           if (fd.isRepeated) {
+            // Repeated ByteString: element size = 8 bytes
             code ++= s"    int size${idx} = msg.${countMethodName}();\n"
-            code ++= s"    Object[] arr${idx} = new Object[size${idx}];\n"
-            code ++= s"    for (int i = 0; i < size${idx}; i++) { arr${idx}[i] = msg.${indexGetterName}(i).toByteArray(); }\n"
-            code ++= s"    ArrayData data${idx} = new GenericArrayData(arr${idx});\n"
-            code ++= s"    writer.write($idx, data${idx}, ((ArrayType) schema.apply($idx).dataType()).elementType());\n"
+            code ++= s"    int offset${idx} = writer.cursor();\n"
+            code ++= s"    org.apache.spark.sql.catalyst.expressions.codegen.UnsafeArrayWriter arrayWriter${idx} = new org.apache.spark.sql.catalyst.expressions.codegen.UnsafeArrayWriter(writer, 8);\n"
+            code ++= s"    arrayWriter${idx}.initialize(size${idx});\n"
+            code ++= s"    for (int i = 0; i < size${idx}; i++) {\n"
+            code ++= s"      com.google.protobuf.ByteString bs = msg.${indexGetterName}(i);\n"
+            code ++= s"      if (bs == null) { arrayWriter${idx}.setNull(i); } else { arrayWriter${idx}.write(i, bs.toByteArray()); }\n"
+            code ++= s"    }\n"
+            code ++= s"    writer.setOffsetAndSizeFromPreviousCursor($idx, offset${idx});\n"
           } else {
             code ++= s"    com.google.protobuf.ByteString b${idx} = msg.${getterName}();\n"
             code ++= s"    if (b${idx} == null) {\n"
@@ -300,11 +320,16 @@ object ProtoToRowGenerator {
           }
         case FieldDescriptor.JavaType.ENUM =>
           if (fd.isRepeated) {
+            // Repeated enums: element size = 8 bytes (strings)
             code ++= s"    int size${idx} = msg.${countMethodName}();\n"
-            code ++= s"    Object[] arr${idx} = new Object[size${idx}];\n"
-            code ++= s"    for (int i = 0; i < size${idx}; i++) { arr${idx}[i] = UTF8String.fromString(msg.${indexGetterName}(i).toString()); }\n"
-            code ++= s"    ArrayData data${idx} = new GenericArrayData(arr${idx});\n"
-            code ++= s"    writer.write($idx, data${idx}, ((ArrayType) schema.apply($idx).dataType()).elementType());\n"
+            code ++= s"    int offset${idx} = writer.cursor();\n"
+            code ++= s"    org.apache.spark.sql.catalyst.expressions.codegen.UnsafeArrayWriter arrayWriter${idx} = new org.apache.spark.sql.catalyst.expressions.codegen.UnsafeArrayWriter(writer, 8);\n"
+            code ++= s"    arrayWriter${idx}.initialize(size${idx});\n"
+            code ++= s"    for (int i = 0; i < size${idx}; i++) {\n"
+            code ++= s"      com.google.protobuf.ProtocolMessageEnum e = msg.${indexGetterName}(i);\n"
+            code ++= s"      if (e == null) { arrayWriter${idx}.setNull(i); } else { arrayWriter${idx}.write(i, UTF8String.fromString(e.toString())); }\n"
+            code ++= s"    }\n"
+            code ++= s"    writer.setOffsetAndSizeFromPreviousCursor($idx, offset${idx});\n"
           } else {
             code ++= s"    com.google.protobuf.ProtocolMessageEnum e${idx} = msg.${getterName}();\n"
             code ++= s"    if (e${idx} == null) {\n"
@@ -315,21 +340,18 @@ object ProtoToRowGenerator {
           }
         case FieldDescriptor.JavaType.MESSAGE =>
           if (fd.isRepeated) {
-            // Repeated message: use nested converter for element type (map entries are treated as repeated message)
+            // Repeated message (including map entries): write array of UnsafeRows using UnsafeArrayWriter
             val nestedName = nestedNames(fd)
-            // For repeated nested messages we loop over each element using getXCount() and getX(int).
-            // We cast the result of the nested converter to UnsafeRow to ensure the element type
-            // is recognised as a concrete UnsafeRow.  Otherwise Janino may infer a more generic
-            // InternalRow and select the wrong overloaded write() method.  The GenericArrayData
-            // stores an array of Object where each element is an UnsafeRow; writer.write
-            // will use the ArrayData overload with a DataType specifying the element schema.
+            val elemSize = 8 // nested structs are variable-length; we store offset & length (8 bytes)
             code ++= s"    int size${idx} = msg.${countMethodName}();\n"
-            code ++= s"    Object[] arr${idx} = new Object[size${idx}];\n"
+            code ++= s"    int offset${idx} = writer.cursor();\n"
+            code ++= s"    org.apache.spark.sql.catalyst.expressions.codegen.UnsafeArrayWriter arrayWriter${idx} = new org.apache.spark.sql.catalyst.expressions.codegen.UnsafeArrayWriter(writer, ${elemSize});\n"
+            code ++= s"    arrayWriter${idx}.initialize(size${idx});\n"
             code ++= s"    for (int i = 0; i < size${idx}; i++) {\n"
-            code ++= s"      arr${idx}[i] = (org.apache.spark.sql.catalyst.expressions.UnsafeRow) ${nestedName}.convert((com.google.protobuf.Message) msg.${indexGetterName}(i));\n"
+            code ++= s"      com.google.protobuf.Message element = (com.google.protobuf.Message) msg.${indexGetterName}(i);\n"
+            code ++= s"      if (element == null) { arrayWriter${idx}.setNull(i); } else { arrayWriter${idx}.write(i, (org.apache.spark.sql.catalyst.expressions.UnsafeRow) ${nestedName}.convert(element)); }\n"
             code ++= s"    }\n"
-            code ++= s"    ArrayData data${idx} = new GenericArrayData(arr${idx});\n"
-            code ++= s"    writer.write($idx, data${idx}, ((ArrayType) schema.apply($idx).dataType()).elementType());\n"
+            code ++= s"    writer.setOffsetAndSizeFromPreviousCursor($idx, offset${idx});\n"
           } else {
             // Singular message: use nested converter, handle nullability
             val nestedName = nestedNames(fd)
