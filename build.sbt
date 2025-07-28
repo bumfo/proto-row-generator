@@ -11,9 +11,9 @@ lazy val root = (project in file(".")).settings(
     // Apache Spark SQL provides the catalyst InternalRow and UnsafeProjection APIs
     "org.apache.spark" %% "spark-sql" % "3.2.1",
     // Protobuf runtime for compiled message classes and descriptors
-    "com.google.protobuf" % "protobuf-java" % "3.25.2",
+    // "com.google.protobuf" % "protobuf-java" % "3.14.0",
     // Janino is used to compile Java code on the fly
-    "org.codehaus.janino" % "janino" % "3.1.9"
+    // "org.codehaus.janino" % "janino" % "3.0.16"
   ),
   // Emit deprecation warnings for easier maintenance
   scalacOptions ++= Seq("-deprecation")
