@@ -1,6 +1,7 @@
 package fastproto
 
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.types.StructType
 
 /**
  * A simple interface for converting compiled Protobuf messages into Spark's
@@ -25,4 +26,13 @@ trait RowConverter[T] extends Serializable {
    * @return an [[InternalRow]] containing the extracted field values
    */
   def convert(message: T): InternalRow
+
+  /**
+   * The Catalyst schema corresponding to this converter.  This schema
+   * describes the structure of the [[InternalRow]] produced by [[convert]].
+   * Implementations should return the [[StructType]] used to build the
+   * UnsafeRow.  This allows callers to inspect the field names and types
+   * without regenerating the schema from a descriptor.
+   */
+  def schema: StructType
 }

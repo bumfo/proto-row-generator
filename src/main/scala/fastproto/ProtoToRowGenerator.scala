@@ -23,6 +23,20 @@ import org.apache.spark.sql.types._
 object ProtoToRowGenerator {
 
   /**
+   * Compute the accessor method suffix for a given field descriptor.  This
+   * converts snake_case names into CamelCase, capitalising each segment.
+   * For example, a field named "source_context" yields "SourceContext".
+   * This helper is defined at the object level so it is visible to both
+   * schema generation and nested converter resolution.
+   */
+  private def accessorName(fd: FieldDescriptor): String = {
+    val name = fd.getName
+    name.split("_").iterator.map { part =>
+      if (part.isEmpty) "" else part.substring(0, 1).toUpperCase + part.substring(1)
+    }.mkString("")
+  }
+
+  /**
    * Recursively build a Spark SQL [[StructType]] corresponding to the
    * structure of a Protobuf message.  Primitive fields are mapped to
    * appropriate Catalyst types; repeated fields become [[ArrayType]] and
@@ -118,7 +132,10 @@ object ProtoToRowGenerator {
         // for an individual element has signature `getX(int index)`.  This
         // approach relies solely on generated getter methods and does not depend
         // on inner class naming conventions or generic lists.
-        val accessor = fd.getName.substring(0, 1).toUpperCase + fd.getName.substring(1)
+        // Compute the accessor method name using CamelCase conversion.  Without
+        // converting underscores, reflection would look for a method like
+        // getSource_context() instead of getSourceContext(), which does not exist.
+        val accessor = accessorName(fd)
         val nestedClass: Class[_ <: com.google.protobuf.Message] =
           if (fd.isRepeated) {
             val m = messageClass.getMethod(s"get${accessor}", classOf[Int])
@@ -177,15 +194,6 @@ object ProtoToRowGenerator {
       code ++= s"    this.${name} = ${name};\n"
     }
     code ++= "  }\n"
-    // Helper to capitalise field names for accessor methods
-    def accessorName(fd: FieldDescriptor): String = {
-      val name = fd.getName
-      // Convert snake_case field names to CamelCase for Java getter methods.
-      // For example, "type_url" becomes "TypeUrl".
-      name.split("_").iterator.map { part =>
-        if (part.isEmpty) "" else part.substring(0, 1).toUpperCase + part.substring(1)
-      }.mkString("")
-    }
     // Generate the typed convert method.  We intentionally omit the @Override
     // annotation here because the Scala trait's erased bridge method is what
     // Janino sees.  Adding @Override on this generic method can lead to
@@ -386,6 +394,14 @@ object ProtoToRowGenerator {
     code ++= "  @Override\n"
     code ++= "  public org.apache.spark.sql.catalyst.InternalRow convert(Object obj) {\n"
     code ++= s"    return this.convert((${messageClass.getName}) obj);\n"
+    code ++= "  }\n"
+
+    // Implement the schema() accessor defined on RowConverter.  Returning the
+    // stored StructType allows callers to inspect the Catalyst schema used
+    // during conversion.
+    code ++= "  @Override\n"
+    code ++= "  public org.apache.spark.sql.types.StructType schema() {\n"
+    code ++= "    return this.schema;\n"
     code ++= "  }\n"
     code ++= "}\n" // End of class
 
