@@ -157,7 +157,8 @@ object ProtoToRowGenerator {
     val code = new StringBuilder
     // Imports required by the generated Java source
     code ++= "import org.apache.spark.sql.catalyst.expressions.UnsafeRow;\n"
-    code ++= "import org.apache.spark.sql.catalyst.expressions.codegen.BufferHolder;\n"
+    // We avoid importing BufferHolder because it is package‑private and cannot be referenced
+    // directly from outside its package.  UnsafeRowWriter handles BufferHolder internally.
     code ++= "import org.apache.spark.sql.catalyst.expressions.codegen.UnsafeRowWriter;\n"
     code ++= "import org.apache.spark.sql.catalyst.util.GenericArrayData;\n"
     code ++= "import org.apache.spark.sql.catalyst.util.ArrayData;\n"
@@ -169,10 +170,9 @@ object ProtoToRowGenerator {
     code ++= "import fastproto.RowConverter;\n"
     // Begin class declaration
     code ++= s"public final class ${className} implements fastproto.RowConverter<${messageClass.getName}> {\n"
-    // Declare fields: schema, result row, buffer holder, row writer, and nested converters
+    // Declare fields: schema, writer, and nested converters.  We avoid referencing
+    // BufferHolder or UnsafeRow directly because BufferHolder is package‑private.
     code ++= "  private final StructType schema;\n"
-    code ++= "  private final UnsafeRow result;\n"
-    code ++= "  private final BufferHolder holder;\n"
     code ++= "  private final UnsafeRowWriter writer;\n"
     nestedNames.values.foreach { name =>
       code ++= s"  private final fastproto.RowConverter ${name};\n"
@@ -183,12 +183,10 @@ object ProtoToRowGenerator {
       code ++= s", fastproto.RowConverter ${name}"
     }
     code ++= ") {\n"
-    // Assign constructor parameters and initialise row/holder/writer
+    // Assign constructor parameters and initialise writer
     code ++= "    this.schema = schema;\n"
     code ++= "    int numFields = schema.length();\n"
-    code ++= "    this.result = new UnsafeRow(numFields);\n"
-    code ++= "    this.holder = new BufferHolder(this.result, 0);\n"
-    code ++= "    this.writer = new UnsafeRowWriter(this.holder, numFields);\n"
+    code ++= "    this.writer = new UnsafeRowWriter(numFields);\n"
     nestedNames.values.foreach { name =>
       code ++= s"    this.${name} = ${name};\n"
     }
@@ -204,7 +202,9 @@ object ProtoToRowGenerator {
     // spurious errors about missing supertype methods.  The bridge method
     // defined below will carry the override annotation.
     code ++= "  public UnsafeRow convert(" + messageClass.getName + " msg) {\n"
-    // Reset the writer for each conversion.  Calling writer.reset() will also reset its BufferHolder.
+    // Reset the writer for each conversion.  Calling reset() clears the buffer and
+    // zeroOutNullBytes() clears the null bitset.  This prepares the writer for
+    // writing a new row.
     code ++= "    writer.reset();\n"
     code ++= "    writer.zeroOutNullBytes();\n"
     // Generate per‑field extraction and writing logic
@@ -357,12 +357,10 @@ object ProtoToRowGenerator {
           }
       }
     }
-    // After all fields have been written, finalise row size and return.  Use
-    // writer.totalSize() to obtain the size because BufferHolder.totalSize()
-    // is package‑private and cannot be accessed from outside its package.
-    code ++= "    int _size = writer.totalSize();\n"
-    code ++= "    result.setTotalSize(_size);\n"
-    code ++= "    return result;\n"
+    // After all fields have been written, finalise row size and return
+    // the UnsafeRow.  Calling writer.getRow() will set the total size and
+    // return the row object.  We avoid directly manipulating BufferHolder.
+    code ++= "    return writer.getRow();\n"
     code ++= "  }\n" // End of convert(T) method
     // Add bridge method to satisfy the generic RowConverter interface.  This
     // method simply casts the object to the expected message type and
