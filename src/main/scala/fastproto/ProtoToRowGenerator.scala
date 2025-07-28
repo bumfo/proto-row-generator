@@ -198,8 +198,11 @@ object ProtoToRowGenerator {
       val name = fd.getName
       name.substring(0, 1).toUpperCase + name.substring(1)
     }
-    // Generate the convert method
-    code ++= "  @Override\n"
+    // Generate the typed convert method.  We intentionally omit the @Override
+    // annotation here because the Scala trait's erased bridge method is what
+    // Janino sees.  Adding @Override on this generic method can lead to
+    // spurious errors about missing supertype methods.  The bridge method
+    // defined below will carry the override annotation.
     code ++= "  public UnsafeRow convert(" + messageClass.getName + " msg) {\n"
     // Reset the writer for each conversion.  Calling writer.reset() will also reset its BufferHolder.
     code ++= "    writer.reset();\n"
@@ -354,15 +357,18 @@ object ProtoToRowGenerator {
           }
       }
     }
-    // After all fields have been written, finalise row size and return
-    code ++= "    result.setTotalSize(holder.totalSize());\n"
+    // After all fields have been written, finalise row size and return.  Use
+    // writer.totalSize() to obtain the size because BufferHolder.totalSize()
+    // is package‑private and cannot be accessed from outside its package.
+    code ++= "    int _size = writer.totalSize();\n"
+    code ++= "    result.setTotalSize(_size);\n"
     code ++= "    return result;\n"
     code ++= "  }\n" // End of convert(T) method
     // Add bridge method to satisfy the generic RowConverter interface.  This
     // method simply casts the object to the expected message type and
-    // delegates to the typed convert method.  We intentionally do not
-    // annotate this method with @Override because the bridge method in the
-    // Scala trait is synthetic and Janino cannot see it.
+    // delegates to the typed convert method.  It overrides the erased
+    // signature defined on the Scala trait.
+    code ++= "  @Override\n"
     code ++= "  public org.apache.spark.sql.catalyst.InternalRow convert(Object obj) {\n"
     code ++= s"    return this.convert((${messageClass.getName}) obj);\n"
     code ++= "  }\n"
