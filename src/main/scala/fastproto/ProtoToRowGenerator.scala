@@ -1,11 +1,13 @@
 package fastproto
 
+// Use JavaConverters for Scala 2.12 compatibility
+import scala.collection.JavaConverters._
 
 import com.google.protobuf.Descriptors.{Descriptor, FieldDescriptor}
-import org.codehaus.janino.SimpleCompiler
-import org.apache.spark.sql.types._
 
-import scala.collection.JavaConverters._
+import org.codehaus.janino.SimpleCompiler
+
+import org.apache.spark.sql.types._
 
 /**
  * Factory object for generating [[RowConverter]] instances on the fly.  Given a
@@ -199,9 +201,7 @@ object ProtoToRowGenerator {
     // Generate the convert method
     code ++= "  @Override\n"
     code ++= "  public UnsafeRow convert(" + messageClass.getName + " msg) {\n"
-    // code ++= "    " + messageClass.getName + " msg = (" + messageClass.getName + ") msgObj;\n"
-    // Reset the buffer holder and writer for each conversion
-    code ++= "    holder.reset();\n"
+    // Reset the writer for each conversion.  Calling writer.reset() will also reset its BufferHolder.
     code ++= "    writer.reset();\n"
     code ++= "    writer.zeroOutNullBytes();\n"
     // Generate per‑field extraction and writing logic
@@ -357,7 +357,14 @@ object ProtoToRowGenerator {
     // After all fields have been written, finalise row size and return
     code ++= "    result.setTotalSize(holder.totalSize());\n"
     code ++= "    return result;\n"
-    code ++= "  }\n" // End of convert method
+    code ++= "  }\n" // End of convert(T) method
+    // Add bridge method to satisfy the generic RowConverter interface.  This
+    // method simply casts the object to the expected message type and
+    // delegates to the typed convert method.
+    code ++= "  @Override\n"
+    code ++= "  public org.apache.spark.sql.catalyst.InternalRow convert(Object obj) {\n"
+    code ++= s"    return this.convert((${messageClass.getName}) obj);\n"
+    code ++= "  }\n"
     code ++= "}\n" // End of class
 
     // Compile the generated Java code using Janino
