@@ -113,34 +113,60 @@ object ProtoToRowGenerator {
     descriptor.getFields.asScala.foreach { fd =>
       if (fd.getJavaType == FieldDescriptor.JavaType.MESSAGE) {
         // Determine the compiled Java class for the nested message.  Protobuf
-        // compiles nested messages as inner classes of the outer message.  We
-        // attempt to resolve the class by simple name first, then try the
-        // descriptor's full name (with dots or dollars) as a fallback.
+        // compiles nested messages as inner classes of the outer message.  However,
+        // the runtime Java class name may differ from the proto descriptor name
+        // due to reserved keywords or custom java_outer_classname options.  To
+        // resolve this, we first search among the declared inner classes of the
+        // outer message class for a class whose descriptor's full name matches the
+        // field descriptor's full name.  If none is found, we fall back to
+        // matching by simple name and then try loading by full name.
         val accessorName = fd.getName.substring(0, 1).toUpperCase + fd.getName.substring(1)
         val getterName = if (fd.isRepeated) s"get${accessorName}List" else s"get${accessorName}"
         val method = messageClass.getMethod(getterName)
-        val simpleName = fd.getMessageType.getName
-        // Try to find a declared inner class whose simple name matches the descriptor name
-        val declared = messageClass.getDeclaredClasses.find(_.getSimpleName == simpleName)
-        val nestedClass: Class[_ <: com.google.protobuf.Message] = declared match {
-          case Some(cls) => cls.asInstanceOf[Class[_ <: com.google.protobuf.Message]]
-          case None =>
-            // Fallback: try the descriptor's full name directly or with $ separators
-            val fullName = fd.getMessageType.getFullName
-            val candidates = List(fullName, fullName.replace('.', '$'))
-            val loaded = candidates.iterator.map { name =>
+        // The full name of the nested message descriptor
+        val targetFullName = fd.getMessageType.getFullName
+        // Attempt 1: find a declared inner class whose getDescriptor().getFullName matches
+        val candidateByDescriptor: Option[Class[_ <: com.google.protobuf.Message]] =
+          messageClass.getDeclaredClasses.collectFirst {
+            case cls if classOf[com.google.protobuf.Message].isAssignableFrom(cls) =>
               try {
-                Some(Class.forName(name).asInstanceOf[Class[_ <: com.google.protobuf.Message]])
+                val descMethod = cls.getMethod("getDescriptor")
+                val nestedDesc = descMethod.invoke(null).asInstanceOf[Descriptor]
+                if (nestedDesc.getFullName == targetFullName) {
+                  cls.asInstanceOf[Class[_ <: com.google.protobuf.Message]]
+                } else null
               } catch {
-                case _: ClassNotFoundException => None
+                case _: Exception => null
               }
-            }.collectFirst { case Some(cls) => cls }
-            loaded.getOrElse {
-              // As a last resort, use the return type of the getter (for non‑repeated fields)
-              if (!fd.isRepeated) method.getReturnType.asInstanceOf[Class[_ <: com.google.protobuf.Message]]
-              else throw new RuntimeException(s"Unable to resolve class for nested message ${fd.getFullName}")
+          }.filter(_ != null)
+        // Attempt 2: match by simple name
+        val simpleName = fd.getMessageType.getName
+        val candidateBySimple: Option[Class[_ <: com.google.protobuf.Message]] =
+          messageClass.getDeclaredClasses.find(_.getSimpleName == simpleName).map(_.asInstanceOf[Class[_ <: com.google.protobuf.Message]])
+        // Attempt 3: try to load class by full name or full name with $ separators
+        val candidateByFullName: Option[Class[_ <: com.google.protobuf.Message]] = {
+          val fullName = targetFullName
+          val candidates = List(fullName, fullName.replace('.', '$'))
+          candidates.iterator.map { name =>
+            try {
+              Some(Class.forName(name).asInstanceOf[Class[_ <: com.google.protobuf.Message]])
+            } catch {
+              case _: ClassNotFoundException => None
             }
+          }.collectFirst { case Some(cls) => cls }
         }
+        val nestedClass: Class[_ <: com.google.protobuf.Message] =
+          candidateByDescriptor
+            .orElse(candidateBySimple)
+            .orElse(candidateByFullName)
+            .getOrElse {
+              // As a last resort, use the return type of the getter for non‑repeated fields
+              if (!fd.isRepeated) {
+                method.getReturnType.asInstanceOf[Class[_ <: com.google.protobuf.Message]]
+              } else {
+                throw new RuntimeException(s"Unable to resolve class for nested message ${fd.getFullName}")
+              }
+            }
         // Recursively generate a converter for the nested message type
         val nestedConverter = generateConverter(fd.getMessageType, nestedClass)
         nestedInfos += NestedInfo(fd, nestedConverter)
