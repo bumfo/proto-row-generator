@@ -33,7 +33,7 @@ object ProtoToRowGenerator {
    * @return a [[StructType]] representing the schema
    */
   private def buildStructType(descriptor: Descriptor): StructType = {
-    val fields = descriptor.getFields.asScala.map { fd =>
+    val fields = descriptor.getFields().asScala.map { fd =>
       val dt = fieldToDataType(fd)
       // Proto3 fields are optional by default; mark field nullable unless explicitly required
       val nullable = !fd.isRequired
@@ -110,64 +110,23 @@ object ProtoToRowGenerator {
     val nestedInfos = scala.collection.mutable.ArrayBuffer[NestedInfo]()
 
     // Inspect each field to detect nested message types that require their own converter
-    descriptor.getFields.asScala.foreach { fd =>
+    descriptor.getFields().asScala.foreach { fd =>
       if (fd.getJavaType == FieldDescriptor.JavaType.MESSAGE) {
-        // Determine the compiled Java class for the nested message.  Protobuf
-        // compiles nested messages as inner classes of the outer message.  However,
-        // the runtime Java class name may differ from the proto descriptor name
-        // due to reserved keywords or custom java_outer_classname options.  To
-        // resolve this, we first search among the declared inner classes of the
-        // outer message class for a class whose descriptor's full name matches the
-        // field descriptor's full name.  If none is found, we fall back to
-        // matching by simple name and then try loading by full name.
-        val accessorName = fd.getName.substring(0, 1).toUpperCase + fd.getName.substring(1)
-        val getterName = if (fd.isRepeated) s"get${accessorName}List" else s"get${accessorName}"
-        val method = messageClass.getMethod(getterName)
-        // The full name of the nested message descriptor
-        val targetFullName = fd.getMessageType.getFullName
-        // Attempt 1: find a declared inner class whose getDescriptor().getFullName matches
-        val candidateByDescriptor: Option[Class[_ <: com.google.protobuf.Message]] =
-          messageClass.getDeclaredClasses.collectFirst {
-            case cls if classOf[com.google.protobuf.Message].isAssignableFrom(cls) =>
-              try {
-                val descMethod = cls.getMethod("getDescriptor")
-                val nestedDesc = descMethod.invoke(null).asInstanceOf[Descriptor]
-                if (nestedDesc.getFullName == targetFullName) {
-                  cls.asInstanceOf[Class[_ <: com.google.protobuf.Message]]
-                } else null
-              } catch {
-                case _: Exception => null
-              }
-          }.filter(_ != null)
-        // Attempt 2: match by simple name
-        val simpleName = fd.getMessageType.getName
-        val candidateBySimple: Option[Class[_ <: com.google.protobuf.Message]] =
-          messageClass.getDeclaredClasses.find(_.getSimpleName == simpleName).map(_.asInstanceOf[Class[_ <: com.google.protobuf.Message]])
-        // Attempt 3: try to load class by full name or full name with $ separators
-        val candidateByFullName: Option[Class[_ <: com.google.protobuf.Message]] = {
-          val fullName = targetFullName
-          val candidates = List(fullName, fullName.replace('.', '$'))
-          candidates.iterator.map { name =>
-            try {
-              Some(Class.forName(name).asInstanceOf[Class[_ <: com.google.protobuf.Message]])
-            } catch {
-              case _: ClassNotFoundException => None
-            }
-          }.collectFirst { case Some(cls) => cls }
-        }
+        // Determine the compiled Java class for the nested message by inspecting the
+        // return type of the generated getter.  For singular nested fields, the
+        // getter has signature `getX()`.  For repeated nested fields, the getter
+        // for an individual element has signature `getX(int index)`.  This
+        // approach relies solely on generated getter methods and does not depend
+        // on inner class naming conventions or generic lists.
+        val accessor = fd.getName.substring(0, 1).toUpperCase + fd.getName.substring(1)
         val nestedClass: Class[_ <: com.google.protobuf.Message] =
-          candidateByDescriptor
-            .orElse(candidateBySimple)
-            .orElse(candidateByFullName)
-            .getOrElse {
-              // As a last resort, use the return type of the getter for non‑repeated fields
-              if (!fd.isRepeated) {
-                method.getReturnType.asInstanceOf[Class[_ <: com.google.protobuf.Message]]
-              } else {
-                throw new RuntimeException(s"Unable to resolve class for nested message ${fd.getFullName}")
-              }
-            }
-        // Recursively generate a converter for the nested message type
+          if (fd.isRepeated) {
+            val m = messageClass.getMethod(s"get${accessor}", classOf[Int])
+            m.getReturnType.asInstanceOf[Class[_ <: com.google.protobuf.Message]]
+          } else {
+            val m = messageClass.getMethod(s"get${accessor}")
+            m.getReturnType.asInstanceOf[Class[_ <: com.google.protobuf.Message]]
+          }
         val nestedConverter = generateConverter(fd.getMessageType, nestedClass)
         nestedInfos += NestedInfo(fd, nestedConverter)
       }
@@ -234,12 +193,12 @@ object ProtoToRowGenerator {
     code ++= "    writer.reset();\n"
     code ++= "    writer.zeroOutNullBytes();\n"
     // Generate per‑field extraction and writing logic
-    descriptor.getFields.asScala.zipWithIndex.foreach { case (fd, idx) =>
-      val getterName = if (fd.isRepeated) {
-        s"get${accessorName(fd)}List"
-      } else {
-        s"get${accessorName(fd)}"
-      }
+    descriptor.getFields().asScala.zipWithIndex.foreach { case (fd, idx) =>
+      // Build accessor method names.  For repeated fields, use getXCount() and getX(index)
+      val listGetterName = s"get${accessorName(fd)}List"
+      val countMethodName = s"get${accessorName(fd)}Count"
+      val indexGetterName = s"get${accessorName(fd)}"
+      val getterName = if (fd.isRepeated) listGetterName else indexGetterName
       val hasMethodName = if (fd.getJavaType == FieldDescriptor.JavaType.MESSAGE && !fd.isRepeated && !(fd.getType == FieldDescriptor.Type.MESSAGE && fd.getMessageType.getOptions.hasMapEntry)) {
         // For singular message fields there is a hasX() method
         Some(s"has${accessorName(fd)}")
@@ -249,11 +208,10 @@ object ProtoToRowGenerator {
       fd.getJavaType match {
         case FieldDescriptor.JavaType.INT =>
           if (fd.isRepeated) {
-            // Repeated int32: build primitive array and write as UnsafeArrayData
-            code ++= s"    java.util.List<Integer> list${idx} = msg.${getterName}();\n"
-            code ++= s"    int size${idx} = list${idx}.size();\n"
+            // Repeated int32: build primitive array and write as UnsafeArrayData using getCount() and get(i)
+            code ++= s"    int size${idx} = msg.${countMethodName}();\n"
             code ++= s"    int[] arr${idx} = new int[size${idx}];\n"
-            code ++= s"    for (int i = 0; i < size${idx}; i++) { arr${idx}[i] = list${idx}.get(i); }\n"
+            code ++= s"    for (int i = 0; i < size${idx}; i++) { arr${idx}[i] = msg.${indexGetterName}(i); }\n"
             code ++= s"    ArrayData data${idx} = org.apache.spark.sql.catalyst.util.UnsafeArrayData.fromPrimitiveArray(arr${idx});\n"
             code ++= s"    writer.write($idx, data${idx}, ((ArrayType) schema.apply($idx).dataType()).elementType());\n"
           } else {
@@ -261,10 +219,9 @@ object ProtoToRowGenerator {
           }
         case FieldDescriptor.JavaType.LONG =>
           if (fd.isRepeated) {
-            code ++= s"    java.util.List<Long> list${idx} = msg.${getterName}();\n"
-            code ++= s"    int size${idx} = list${idx}.size();\n"
+            code ++= s"    int size${idx} = msg.${countMethodName}();\n"
             code ++= s"    long[] arr${idx} = new long[size${idx}];\n"
-            code ++= s"    for (int i = 0; i < size${idx}; i++) { arr${idx}[i] = list${idx}.get(i); }\n"
+            code ++= s"    for (int i = 0; i < size${idx}; i++) { arr${idx}[i] = msg.${indexGetterName}(i); }\n"
             code ++= s"    ArrayData data${idx} = org.apache.spark.sql.catalyst.util.UnsafeArrayData.fromPrimitiveArray(arr${idx});\n"
             code ++= s"    writer.write($idx, data${idx}, ((ArrayType) schema.apply($idx).dataType()).elementType());\n"
           } else {
@@ -272,10 +229,9 @@ object ProtoToRowGenerator {
           }
         case FieldDescriptor.JavaType.FLOAT =>
           if (fd.isRepeated) {
-            code ++= s"    java.util.List<Float> list${idx} = msg.${getterName}();\n"
-            code ++= s"    int size${idx} = list${idx}.size();\n"
+            code ++= s"    int size${idx} = msg.${countMethodName}();\n"
             code ++= s"    float[] arr${idx} = new float[size${idx}];\n"
-            code ++= s"    for (int i = 0; i < size${idx}; i++) { arr${idx}[i] = list${idx}.get(i); }\n"
+            code ++= s"    for (int i = 0; i < size${idx}; i++) { arr${idx}[i] = msg.${indexGetterName}(i); }\n"
             code ++= s"    ArrayData data${idx} = org.apache.spark.sql.catalyst.util.UnsafeArrayData.fromPrimitiveArray(arr${idx});\n"
             code ++= s"    writer.write($idx, data${idx}, ((ArrayType) schema.apply($idx).dataType()).elementType());\n"
           } else {
@@ -283,10 +239,9 @@ object ProtoToRowGenerator {
           }
         case FieldDescriptor.JavaType.DOUBLE =>
           if (fd.isRepeated) {
-            code ++= s"    java.util.List<Double> list${idx} = msg.${getterName}();\n"
-            code ++= s"    int size${idx} = list${idx}.size();\n"
+            code ++= s"    int size${idx} = msg.${countMethodName}();\n"
             code ++= s"    double[] arr${idx} = new double[size${idx}];\n"
-            code ++= s"    for (int i = 0; i < size${idx}; i++) { arr${idx}[i] = list${idx}.get(i); }\n"
+            code ++= s"    for (int i = 0; i < size${idx}; i++) { arr${idx}[i] = msg.${indexGetterName}(i); }\n"
             code ++= s"    ArrayData data${idx} = org.apache.spark.sql.catalyst.util.UnsafeArrayData.fromPrimitiveArray(arr${idx});\n"
             code ++= s"    writer.write($idx, data${idx}, ((ArrayType) schema.apply($idx).dataType()).elementType());\n"
           } else {
@@ -294,10 +249,9 @@ object ProtoToRowGenerator {
           }
         case FieldDescriptor.JavaType.BOOLEAN =>
           if (fd.isRepeated) {
-            code ++= s"    java.util.List<Boolean> list${idx} = msg.${getterName}();\n"
-            code ++= s"    int size${idx} = list${idx}.size();\n"
+            code ++= s"    int size${idx} = msg.${countMethodName}();\n"
             code ++= s"    Object[] arr${idx} = new Object[size${idx}];\n"
-            code ++= s"    for (int i = 0; i < size${idx}; i++) { arr${idx}[i] = list${idx}.get(i); }\n"
+            code ++= s"    for (int i = 0; i < size${idx}; i++) { arr${idx}[i] = msg.${indexGetterName}(i); }\n"
             code ++= s"    ArrayData data${idx} = new GenericArrayData(arr${idx});\n"
             code ++= s"    writer.write($idx, data${idx}, ((ArrayType) schema.apply($idx).dataType()).elementType());\n"
           } else {
@@ -305,10 +259,9 @@ object ProtoToRowGenerator {
           }
         case FieldDescriptor.JavaType.STRING =>
           if (fd.isRepeated) {
-            code ++= s"    java.util.List<String> list${idx} = msg.${getterName}();\n"
-            code ++= s"    int size${idx} = list${idx}.size();\n"
+            code ++= s"    int size${idx} = msg.${countMethodName}();\n"
             code ++= s"    Object[] arr${idx} = new Object[size${idx}];\n"
-            code ++= s"    for (int i = 0; i < size${idx}; i++) { String s = list${idx}.get(i); arr${idx}[i] = (s == null ? null : UTF8String.fromString(s)); }\n"
+            code ++= s"    for (int i = 0; i < size${idx}; i++) { String s = msg.${indexGetterName}(i); arr${idx}[i] = (s == null ? null : UTF8String.fromString(s)); }\n"
             code ++= s"    ArrayData data${idx} = new GenericArrayData(arr${idx});\n"
             code ++= s"    writer.write($idx, data${idx}, ((ArrayType) schema.apply($idx).dataType()).elementType());\n"
           } else {
@@ -321,10 +274,9 @@ object ProtoToRowGenerator {
           }
         case FieldDescriptor.JavaType.BYTE_STRING =>
           if (fd.isRepeated) {
-            code ++= s"    java.util.List<com.google.protobuf.ByteString> list${idx} = msg.${getterName}();\n"
-            code ++= s"    int size${idx} = list${idx}.size();\n"
+            code ++= s"    int size${idx} = msg.${countMethodName}();\n"
             code ++= s"    Object[] arr${idx} = new Object[size${idx}];\n"
-            code ++= s"    for (int i = 0; i < size${idx}; i++) { arr${idx}[i] = list${idx}.get(i).toByteArray(); }\n"
+            code ++= s"    for (int i = 0; i < size${idx}; i++) { arr${idx}[i] = msg.${indexGetterName}(i).toByteArray(); }\n"
             code ++= s"    ArrayData data${idx} = new GenericArrayData(arr${idx});\n"
             code ++= s"    writer.write($idx, data${idx}, ((ArrayType) schema.apply($idx).dataType()).elementType());\n"
           } else {
@@ -337,10 +289,9 @@ object ProtoToRowGenerator {
           }
         case FieldDescriptor.JavaType.ENUM =>
           if (fd.isRepeated) {
-            code ++= s"    java.util.List<? extends com.google.protobuf.ProtocolMessageEnum> list${idx} = msg.${getterName}();\n"
-            code ++= s"    int size${idx} = list${idx}.size();\n"
+            code ++= s"    int size${idx} = msg.${countMethodName}();\n"
             code ++= s"    Object[] arr${idx} = new Object[size${idx}];\n"
-            code ++= s"    for (int i = 0; i < size${idx}; i++) { arr${idx}[i] = UTF8String.fromString(list${idx}.get(i).toString()); }\n"
+            code ++= s"    for (int i = 0; i < size${idx}; i++) { arr${idx}[i] = UTF8String.fromString(msg.${indexGetterName}(i).toString()); }\n"
             code ++= s"    ArrayData data${idx} = new GenericArrayData(arr${idx});\n"
             code ++= s"    writer.write($idx, data${idx}, ((ArrayType) schema.apply($idx).dataType()).elementType());\n"
           } else {
@@ -355,10 +306,9 @@ object ProtoToRowGenerator {
           if (fd.isRepeated) {
             // Repeated message: use nested converter for element type (map entries are treated as repeated message)
             val nestedName = nestedNames(fd)
-            code ++= s"    java.util.List list${idx} = msg.${getterName}();\n"
-            code ++= s"    int size${idx} = list${idx}.size();\n"
+            code ++= s"    int size${idx} = msg.${countMethodName}();\n"
             code ++= s"    Object[] arr${idx} = new Object[size${idx}];\n"
-            code ++= s"    for (int i = 0; i < size${idx}; i++) { arr${idx}[i] = ${nestedName}.convert((com.google.protobuf.Message) list${idx}.get(i)); }\n"
+            code ++= s"    for (int i = 0; i < size${idx}; i++) { arr${idx}[i] = ${nestedName}.convert((com.google.protobuf.Message) msg.${indexGetterName}(i)); }\n"
             code ++= s"    ArrayData data${idx} = new GenericArrayData(arr${idx});\n"
             code ++= s"    writer.write($idx, data${idx}, ((ArrayType) schema.apply($idx).dataType()).elementType());\n"
           } else {
