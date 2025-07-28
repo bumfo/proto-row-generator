@@ -179,7 +179,11 @@ object ProtoToRowGenerator {
     // Helper to capitalise field names for accessor methods
     def accessorName(fd: FieldDescriptor): String = {
       val name = fd.getName
-      name.substring(0, 1).toUpperCase + name.substring(1)
+      // Convert snake_case field names to CamelCase for Java getter methods.
+      // For example, "type_url" becomes "TypeUrl".
+      name.split("_").iterator.map { part =>
+        if (part.isEmpty) "" else part.substring(0, 1).toUpperCase + part.substring(1)
+      }.mkString("")
     }
     // Generate the typed convert method.  We intentionally omit the @Override
     // annotation here because the Scala trait's erased bridge method is what
@@ -194,6 +198,13 @@ object ProtoToRowGenerator {
     code ++= "    writer.zeroOutNullBytes();\n"
     // Generate per‑field extraction and writing logic
     descriptor.getFields().asScala.zipWithIndex.foreach { case (fd, idx) =>
+      // Insert a comment into the generated Java code to aid debugging.  This
+      // comment identifies the Protobuf field being processed along with
+      // whether it is repeated.  Because Janino reports compilation errors
+      // relative to the generated source, adding field names to the
+      // generated code makes it easier to trace errors back to the original
+      // descriptor.
+      code ++= s"    // Field '${fd.getName}', JavaType=${fd.getJavaType}, repeated=${fd.isRepeated}\n"
       // Build accessor method names.  For repeated fields, use getXCount() and getX(index)
       val listGetterName = s"get${accessorName(fd)}List"
       val countMethodName = s"get${accessorName(fd)}Count"
@@ -306,9 +317,17 @@ object ProtoToRowGenerator {
           if (fd.isRepeated) {
             // Repeated message: use nested converter for element type (map entries are treated as repeated message)
             val nestedName = nestedNames(fd)
+            // For repeated nested messages we loop over each element using getXCount() and getX(int).
+            // We cast the result of the nested converter to UnsafeRow to ensure the element type
+            // is recognised as a concrete UnsafeRow.  Otherwise Janino may infer a more generic
+            // InternalRow and select the wrong overloaded write() method.  The GenericArrayData
+            // stores an array of Object where each element is an UnsafeRow; writer.write
+            // will use the ArrayData overload with a DataType specifying the element schema.
             code ++= s"    int size${idx} = msg.${countMethodName}();\n"
             code ++= s"    Object[] arr${idx} = new Object[size${idx}];\n"
-            code ++= s"    for (int i = 0; i < size${idx}; i++) { arr${idx}[i] = ${nestedName}.convert((com.google.protobuf.Message) msg.${indexGetterName}(i)); }\n"
+            code ++= s"    for (int i = 0; i < size${idx}; i++) {\n"
+            code ++= s"      arr${idx}[i] = (org.apache.spark.sql.catalyst.expressions.UnsafeRow) ${nestedName}.convert((com.google.protobuf.Message) msg.${indexGetterName}(i));\n"
+            code ++= s"    }\n"
             code ++= s"    ArrayData data${idx} = new GenericArrayData(arr${idx});\n"
             code ++= s"    writer.write($idx, data${idx}, ((ArrayType) schema.apply($idx).dataType()).elementType());\n"
           } else {
@@ -320,14 +339,14 @@ object ProtoToRowGenerator {
                 code ++= s"      writer.setNullAt($idx);\n"
                 code ++= s"    } else {\n"
                 code ++= s"      com.google.protobuf.Message v${idx} = (com.google.protobuf.Message) msg.${getterName}();\n"
-                code ++= s"      writer.write($idx, ${nestedName}.convert(v${idx}), (StructType) schema.apply($idx).dataType());\n"
+                code ++= s"      writer.write($idx, (org.apache.spark.sql.catalyst.expressions.UnsafeRow) ${nestedName}.convert(v${idx}));\n"
                 code ++= s"    }\n"
               case None =>
                 code ++= s"    com.google.protobuf.Message v${idx} = (com.google.protobuf.Message) msg.${getterName}();\n"
                 code ++= s"    if (v${idx} == null) {\n"
                 code ++= s"      writer.setNullAt($idx);\n"
                 code ++= s"    } else {\n"
-                code ++= s"      writer.write($idx, ${nestedName}.convert(v${idx}), (StructType) schema.apply($idx).dataType());\n"
+                code ++= s"      writer.write($idx, (org.apache.spark.sql.catalyst.expressions.UnsafeRow) ${nestedName}.convert(v${idx}));\n"
                 code ++= s"    }\n"
             }
           }
