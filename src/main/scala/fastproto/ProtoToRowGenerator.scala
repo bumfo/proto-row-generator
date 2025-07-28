@@ -360,8 +360,9 @@ object ProtoToRowGenerator {
     code ++= "  }\n" // End of convert(T) method
     // Add bridge method to satisfy the generic RowConverter interface.  This
     // method simply casts the object to the expected message type and
-    // delegates to the typed convert method.
-    code ++= "  @Override\n"
+    // delegates to the typed convert method.  We intentionally do not
+    // annotate this method with @Override because the bridge method in the
+    // Scala trait is synthetic and Janino cannot see it.
     code ++= "  public org.apache.spark.sql.catalyst.InternalRow convert(Object obj) {\n"
     code ++= s"    return this.convert((${messageClass.getName}) obj);\n"
     code ++= "  }\n"
